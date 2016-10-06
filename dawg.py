@@ -5,7 +5,7 @@ import hashlib
 import collections
 
 from logger import *
-logger = setup_logger(__name__)
+logger = setup_logger(__name__, True)
 log = logger.info
 
 # chars = "\x00 0123456789abcdefghijklmnopqrstuvwxyz"
@@ -15,8 +15,8 @@ CHARSET = NULL_CHAR + """ "$&'(),-./0123456789:;ABCDEFGHIJKLMNOPQRSTUVWXYZ`abcde
 MASK_END_OF_DATA = 0x80
 MASK_DATA = 0x7F
 
-VALID_WORD_REG_EX = re.compile('^[{}]*$'.format(re.escape(CHARSET)))
-
+# Note that NULL_CHAR is NOT in the valid_word_regex
+VALID_WORD_REG_EX = re.compile('^[{}]*$'.format(re.escape(CHARSET[1:])))
 
 def valid_string(string):
     return bool(VALID_WORD_REG_EX.match(string))
@@ -288,17 +288,24 @@ class DAWGNode(object):
             strings += child.dump_strings(string, debug)
         return strings
 
+    # Returns number of nodes created
+    # -1 indicates the string contains chars not in CHARSET
+    # 0 indicates the string is already present
+    # >0 indicates the string was inserted
     def insert(self, string):
-        assert valid_string(string)
+        if not valid_string(string):
+            return -1
+        newnodes = 0
         node = self
         assert NULL_CHAR not in string
         for letter in string + NULL_CHAR:
             assert letter in CHARSET
             if not letter in node.children:
                 node.children[letter] = node = DAWGNode(letter)
+                newnodes += 1
             else:
                 node = node.children[letter]
-        return node
+        return newnodes
 
     def find(self, string):
         node = self
