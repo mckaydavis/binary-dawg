@@ -18,7 +18,6 @@ MASK_DATA = 0x7F
 VALID_WORD_REG_EX = re.compile('^[{}]*$'.format(re.escape(CHARSET)))
 
 
-
 def valid_string(string):
     return bool(VALID_WORD_REG_EX.match(string))
 
@@ -62,7 +61,7 @@ class DAWGNode(object):
         if not self.hasher:
             self.hasher = hashlib.sha256()
             self.hasher.update(self.letter.encode())
-            for letter, child in sorted(self.children.items()):
+            for child in self.sorted_children():
                 self.hasher.update(child.get_hasher().digest())
         return self.hasher
 
@@ -90,15 +89,13 @@ class DAWGNode(object):
     def first_child(self):
         if not self.children:
             return None
-        return next (iter (self.children.values()))
-
+        return next(iter(self.children.values()))
 
     def find_terminal_node(self):
         node = self
         while node.children:
             node = node.first_child()
         return node
-
 
     def flatten_tree_to_nodes(self):
         self.set_attr('index', 0)
@@ -119,24 +116,22 @@ class DAWGNode(object):
 
         return nodes
 
-
     def log_parent_info(self, extra=False):
         self.count_parents()
         nodes = self.flatten_tree_to_nodes()
         nparents = collections.Counter()
         total = sum([node.nparents for node in nodes])
         for node in nodes:
-            nparents[(node.nparents,len(node.children))] += 1
+            nparents[(node.nparents, len(node.children))] += 1
 
-        for k,v in sorted(nparents.items()):
-            log("{} nparents[{}] = {}".format(k[0], k,v))
+        for k, v in sorted(nparents.items()):
+            log("{} nparents[{}] = {}".format(k[0], k, v))
 
         for node in nodes:
             if node.nparents > 133:
                 log("[{}] = {}".format(node.nparents, " ".join(node.dump_strings(debug=True))))
             if extra and node.nparents == 1 and len(node.children) == 1:
                 log("1-1: idx={}, letter={}, keys={}, strings=({})".format(node.index, node.letter, node.keys(), ", ".join(node.dump_strings())))
-
 
         log("total_nparents={}".format(total))
         log("sum 32 top_parents={}".format(sum([k[0] for k in list(sorted(nparents.keys()))[-32:]])))
@@ -156,16 +151,15 @@ class DAWGNode(object):
 
     @staticmethod
     def convert_nodes_to_index_list(nodes):
-        data = []
+
         def mark_eod():
             nonlocal data
             assert data
             assert data[-1] & MASK_END_OF_DATA == 0, "End of Data marker already present"
             data[-1] |= MASK_END_OF_DATA
 
-
         assert nodes[0].index == 1
-
+        data = []
         nedges = 0
         terminal_count = 0
 
@@ -176,7 +170,7 @@ class DAWGNode(object):
 
         for i, node in enumerate(nodes):
             nedges += len(node.children)
-            assert node.index-1 == i, "index={} len(data)={}".format(node.index, i)
+            assert node.index - 1 == i, "index={} len(data)={}".format(node.index, i)
 
             if node.index == 1:
                 assert not node.children
@@ -190,7 +184,7 @@ class DAWGNode(object):
 
             mark_eod()
 
-            for letter, child in sorted(node.children.items()):
+            for child in node.sorted_children():
                 child_index = child.index - 1
                 data.append(child_index & 0xFF)
                 data.append((child_index >> 8) & 0xFF)
@@ -199,7 +193,6 @@ class DAWGNode(object):
                     terminal_count += 1
 
             mark_eod()
-
 
         if logger:
             nnodes = len(nodes)
@@ -229,11 +222,13 @@ class DAWGNode(object):
 
     @staticmethod
     def from_binary(binary_data):
+        # Index of the current byte being read
+        binary_data_pos = 0
 
         def eat():
-            nonlocal pos
-            pos += 1
-            return binary_data[pos-1]
+            nonlocal binary_data_pos
+            binary_data_pos += 1
+            return binary_data[binary_data_pos - 1]
 
         def eat_7bits_and_eod():
             val = eat()
@@ -243,38 +238,39 @@ class DAWGNode(object):
             b0 = eat()
             b1, eod = eat_7bits_and_eod()
             return b1 << 8 | b0, eod
-        pos = 0
 
-
+        # Read number of nodes
         nnodes, eod = eat_15bits_and_eod()
-        log("from_binary nnodes={}".format(nnodes))
+        assert(eod)
 
-        # Initialize with terminal node
-        nodes = [DAWGNode(index=i+1) for i in range(nnodes)]
+        # Create big empty list of nodes
+        nodes = [DAWGNode(index=i + 1) for i in range(nnodes)]
 
         idx = 1
-        while pos < len(binary_data):
+        while binary_data_pos < len(binary_data):
             node = nodes[idx]
             idx += 1
+
+            # Read binary letters until hitting End Of Data bit
             node.letter = ""
             eod = False
             while not eod:
                 data, eod = eat_7bits_and_eod()
                 node.letter += ordch(data)
 
+            # Read binary child indexes until hitting End Of Data bit
             eod = False
             node.children = []
             while not eod:
                 child_index, eod = eat_15bits_and_eod()
                 node.children.append(child_index)
 
+        # Redirect child_indexes to actual nodes in the nodelist
         for node in nodes:
             node.children = {nodes[index].letter[0]: nodes[index] for index in node.children}
 
         root_node = nodes[1]
         terminal_node = nodes[0]
-
-        #log("load terminal_count={}".format(terminal_count))
 
         assert not terminal_node.children, "Terminal node is not childless"
         assert root_node.children, "Root node doesn't have children"
@@ -292,17 +288,16 @@ class DAWGNode(object):
             strings += child.dump_strings(string, debug)
         return strings
 
-
     def insert(self, string):
+        assert valid_string(string)
         node = self
-        assert len(string) and string[-1] == NULL_CHAR and NULL_CHAR not in string[:-1]
-        for letter in string:
+        assert NULL_CHAR not in string
+        for letter in string + NULL_CHAR:
             assert letter in CHARSET
             if not letter in node.children:
                 node.children[letter] = node = DAWGNode(letter)
             else:
                 node = node.children[letter]
-        #node.end_of_word = True
         return node
 
     def find(self, string):
@@ -319,18 +314,16 @@ class DAWGNode(object):
 
         return node
 
-
     def keys(self):
         return "".join(sorted(self.children.keys()))
 
     def sorted_children(self):
-        return [v for k,v in sorted(self.children.items())]
+        return [v for k, v in sorted(self.children.items())]
 
     def __contains__(self, string):
         assert NULL_CHAR not in string
         node = self.find(NULL_CHAR + string + NULL_CHAR)
         return node and not node.children
-
 
     def compress(self):
         # self.log_parent_info()
@@ -345,7 +338,7 @@ class DAWGNode(object):
 
     @staticmethod
     def recursive_compress(node, hash_table):
-        node.children = {letter: DAWGNode.recursive_compress(child, hash_table) for letter, child in sorted(node.children.items())}
+        node.children = {child.letter[0]: DAWGNode.recursive_compress(child, hash_table) for child in node.sorted_children()}
         hash_value = node.get_hasher().hexdigest()
         if hash_value in hash_table:
             node = hash_table[hash_value]
@@ -379,12 +372,10 @@ class DAWGNode(object):
 
             todo += list(node.children.values())
 
-        log("compress_sticks total={}, nnodes={} ({:.2f}%), discarded={} ({:.2f}%), ".format(nnodes + discarded, nnodes, 100.0*nnodes/(discarded+nnodes), discarded, 100.0*discarded/(discarded+nnodes)))
+        percent = 100.0 / (discarded + nnodes)
+        log("compress_sticks total={}, nnodes={} ({:.2f}%), discarded={} ({:.2f}%), ".format(nnodes + discarded, nnodes, nnodes * percent, discarded, discarded * percent))
 
         return node
-
-
-
 
 
 class DAWG:
@@ -422,8 +413,7 @@ class DAWG:
         return txt
 
     def insert(self, string):
-        assert valid_string(string)
-        return self.root_node.insert(string + NULL_CHAR)
+        return self.root_node.insert(string)
 
     def find(self, string):
         return self.root_node.find(string)
